@@ -1,9 +1,9 @@
 {
   "total_laws_approx": 44960,
-  "processed_count": 9497,
-  "skipped_repealed": 0,
-  "files_left_approx": 35463,
-  "current_page": 4496,
+  "processed_count": 9517,
+  "skipped_repealed": 1,
+  "files_left_approx": 35442,
+  "current_page": 20,
   "current_row": 0,
   "last_updated": "running"
 }
