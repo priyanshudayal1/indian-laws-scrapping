@@ -1,0 +1,4 @@
+playwright
+aiohttp
+boto3
+python-dotenv
