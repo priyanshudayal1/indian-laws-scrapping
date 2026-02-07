@@ -271,58 +271,31 @@ async def navigate_to_page(page, target_page):
 
 async def scrape_india_code(max_retries=3):
     """
-    Scrape India Code website with resume support:
+    Crawl India Code website for NEW files only:
     1. Navigate to the website and perform search
-    2. Resume from last page/row if crashed
-    3. Extract all laws from paginated table
-    4. Download English PDFs for each law
+    2. Check each law against download history and repealed laws
+    3. Download ONLY if: NOT already downloaded AND NOT in repealed list
+    4. Optimize by skipping ahead when encountering many already-processed files
     """
     download_dir = Path("indian_laws_pdfs")
     download_dir.mkdir(exist_ok=True)
     
     repealed_names = load_repealed_laws()
-    print(f"Loaded {len(repealed_names)} repealed laws.")
+    print(f"\n{'='*60}")
+    print("CRAWLER MODE - Checking for NEW files only")
+    print(f"{'='*60}")
+    print(f"Loaded {len(repealed_names)} repealed laws to skip.")
 
     processed_files = load_processed_laws()
-    print(f"Loaded {len(processed_files)} previously processed files.")
+    print(f"Loaded {len(processed_files)} previously downloaded files.")
+    print(f"Will only download files that are:")
+    print(f"  ✓ NOT in download history")
+    print(f"  ✓ NOT in repealed laws list")
+    print(f"{'='*60}\n")
     
-    # Load previous progress for resume
-    prev_progress = load_progress()
+    # Crawler always starts from page 1 to check for new files
     resume_page = 1
     resume_row = 0
-    
-    if prev_progress and prev_progress.get('current_page', 0) > 1:
-        saved_page = prev_progress.get('current_page', 1)
-        saved_row = prev_progress.get('current_row', 0)
-        processed_count = prev_progress.get('processed_count', 0)
-        
-        # Validate: Make sure saved_page makes sense relative to processed files
-        # Estimate expected page: (processed_files + buffer) / 10 rows per page
-        # Add buffer because some rows may skip (already processed, no PDF, etc.)
-        expected_max_page = max(1, (len(processed_files) // 5) + 50)  # Conservative estimate with large buffer
-        
-        if saved_page > expected_max_page:
-            # Progress file is corrupted - resume page doesn't match processed count
-            # Recalculate based on actual processed files
-            estimated_page = max(1, (len(processed_files) // 10) + 1)
-            print(f"WARNING: Progress mismatch detected!")
-            print(f"  Saved page: {saved_page}, but only {len(processed_files)} files processed")
-            print(f"  Expected max page: ~{expected_max_page}")
-            print(f"  Resetting to estimated page: {estimated_page}")
-            resume_page = estimated_page
-            resume_row = 0
-            # Update progress file with corrected values
-            update_progress(
-                prev_progress.get('total_laws_approx', 0),
-                len(processed_files),
-                resume_page,
-                0,
-                prev_progress.get('skipped_repealed', 0)
-            )
-        else:
-            resume_page = saved_page
-            resume_row = saved_row
-            print(f"Found previous progress: Resuming from page {resume_page}, row {resume_row}")
     
     async with async_playwright() as p:
         # Try Firefox as fallback - often works better on government sites
@@ -331,13 +304,13 @@ async def scrape_india_code(max_retries=3):
         if browser_type == 'firefox':
             print("Using Firefox browser...")
             browser = await p.firefox.launch(
-                headless=True,
+                headless=False,
                 args=['--no-sandbox']
             )
         else:
             print("Using Chromium browser...")
             browser = await p.chromium.launch(
-                headless=True,
+                headless=False,
                 args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -589,16 +562,14 @@ async def scrape_india_code(max_retries=3):
             except Exception:
                 pass
 
-            # Navigate to resume page if needed
-            if resume_page > 1:
-                await navigate_to_page(page, resume_page)
-
+            # Crawler starts from page 1
             async with aiohttp.ClientSession() as session:
-                page_num = resume_page
-                total_downloaded = len(processed_files)
+                page_num = 1
+                total_downloaded = 0  # Count only NEW downloads in this session
                 skipped_repealed = 0
-                is_first_page_after_resume = (resume_page > 1)
+                skipped_already_downloaded = 0
                 consecutive_empty_pages = 0  # Track pages with no valid links
+                consecutive_skipped = 0  # Track consecutive already-downloaded files
                 
                 while True:
                     print(f"\n{'='*60}")
@@ -611,18 +582,10 @@ async def scrape_india_code(max_retries=3):
                     rows = await page.query_selector_all("#myTableSection tbody tr")
                     print(f"Found {len(rows)} rows on this page")
                     
-                    # Determine starting row (for resume)
-                    start_row = 0
-                    if is_first_page_after_resume and resume_row > 0:
-                        start_row = resume_row
-                        print(f"Resuming from row {start_row + 1}")
-                        is_first_page_after_resume = False
-                    
                     links_found_on_page = 0
+                    new_downloads_on_page = 0
+                    
                     for idx, row in enumerate(rows):
-                        # Skip rows before resume point
-                        if idx < start_row:
-                            continue
                         
                         row_num = idx + 1
                         
@@ -649,17 +612,34 @@ async def scrape_india_code(max_retries=3):
                             # Create filename early for duplicate check
                             pdf_filename = sanitize_filename(f"{law_name}.pdf")
                             
-                            # Check if already processed
+                            # CRAWLER LOGIC: Skip if already downloaded
                             if pdf_filename in processed_files:
-                                print(f"    - Already processed: {pdf_filename}")
-                                update_progress(total_laws_count, total_downloaded, page_num, idx, skipped_repealed)
+                                print(f"    ⏭️  SKIP: Already downloaded")
+                                skipped_already_downloaded += 1
+                                consecutive_skipped += 1
+                                update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, idx, skipped_repealed)
+                                
+                                # Optimization: If we've skipped 20+ consecutive files, jump ahead
+                                if consecutive_skipped >= 20:
+                                    print(f"\n    {'⚡'*20}")
+                                    print(f"    ⚡ OPTIMIZATION: {consecutive_skipped} consecutive files already downloaded")
+                                    print(f"    ⚡ Likely all files on this page are old - moving to next page")
+                                    print(f"    {'⚡'*20}\n")
+                                    break  # Skip rest of this page
+                                
                                 continue
                             
+                            # CRAWLER LOGIC: Skip if repealed
                             if is_repealed(law_name, repealed_names):
-                                print(f"    - Skipping repealed law: {law_name}")
+                                print(f"    ⏭️  SKIP: Repealed law")
                                 skipped_repealed += 1
-                                update_progress(total_laws_count, total_downloaded, page_num, idx, skipped_repealed)
+                                consecutive_skipped += 1
+                                update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, idx, skipped_repealed)
                                 continue
+                            
+                            # Reset consecutive skip counter - found a new file
+                            consecutive_skipped = 0
+                            print(f"    🆕 NEW FILE DETECTED - Downloading...")
                             
                             href = await link_elem.get_attribute("href")
                             if not href:
@@ -705,9 +685,11 @@ async def scrape_india_code(max_retries=3):
                                                             processed_files.add(pdf_filename)
                                                             save_processed_law(pdf_filename)
                                                             total_downloaded += 1
+                                                            new_downloads_on_page += 1
                                                             
-                                                            update_progress(total_laws_count, total_downloaded, page_num, idx, skipped_repealed)
+                                                            update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, idx, skipped_repealed)
                                                             pdf_downloaded = True
+                                                            print(f"  🎉 SUCCESS: New file downloaded and uploaded!")
                                                             
                                                         except OSError as e:
                                                             print(f"  Warning: Could not delete {pdf_filename}: {e}")
@@ -760,22 +742,24 @@ async def scrape_india_code(max_retries=3):
                             print(f"  ✗ Error processing row {row_num}: {e}")
                             continue
                     
+                    # Page summary
+                    print(f"\n{'─'*60}")
+                    print(f"📊 Page {page_num} Summary:")
+                    print(f"   • New downloads: {new_downloads_on_page}")
+                    print(f"   • Already downloaded: {skipped_already_downloaded}")
+                    print(f"   • Repealed (skipped): {skipped_repealed}")
+                    print(f"{'─'*60}\n")
+                    
                     # Track consecutive pages with no valid links
                     if links_found_on_page == 0:
                         consecutive_empty_pages += 1
-                        print(f"  WARNING: No valid links found on this page ({consecutive_empty_pages} consecutive empty pages)")
+                        print(f"  ⚠️  WARNING: No valid links found on this page ({consecutive_empty_pages} consecutive empty pages)")
                         
-                        # If we've had 10+ consecutive empty pages, something is wrong
-                        # Likely we've navigated beyond the actual data
                         if consecutive_empty_pages >= 10:
                             print(f"\n{'='*60}")
-                            print("ERROR: 10 consecutive pages with no links found!")
-                            print("This likely means we've navigated beyond the actual data.")
-                            print("Resetting progress to page 1 for a fresh start...")
+                            print("❌ ERROR: 10 consecutive pages with no links found!")
+                            print("Likely navigated beyond actual data. Stopping crawler.")
                             print(f"{'='*60}")
-                            
-                            # Reset progress file to start from page 1
-                            update_progress(total_laws_count, total_downloaded, 1, 0, skipped_repealed)
                             break
                     else:
                         consecutive_empty_pages = 0  # Reset counter when we find links
@@ -836,13 +820,18 @@ async def scrape_india_code(max_retries=3):
                         print("No next button found, stopping...")
                         break
             
-            print(f"\n✓ Scraping completed!")
-            print(f"✓ Total PDFs downloaded: {total_downloaded}")
-            print(f"✓ Repealed laws skipped: {skipped_repealed}")
-            print(f"✓ PDFs saved in: {download_dir.absolute()}")
+            print(f"\n{'='*60}")
+            print(f"✅ CRAWLER SESSION COMPLETED!")
+            print(f"{'='*60}")
+            print(f"📥 NEW files downloaded this session: {total_downloaded}")
+            print(f"⏭️  Already downloaded (skipped): {skipped_already_downloaded}")
+            print(f"⏭️  Repealed laws (skipped): {skipped_repealed}")
+            print(f"📁 Total files in history: {len(processed_files)}")
+            print(f"💾 PDFs saved in: {download_dir.absolute()}")
+            print(f"{'='*60}\n")
             
             # Mark progress as complete
-            update_progress(total_laws_count, total_downloaded, page_num, 0, skipped_repealed)
+            update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, 0, skipped_repealed)
 
         except Exception as e:
             print(f"\n✗ Error occurred: {e}")
@@ -872,8 +861,13 @@ if __name__ == "__main__":
     
     # Print usage info
     print("=" * 60)
-    print("Indian Law Scraper")
+    print("Indian Law Crawler - NEW Files Only")
     print("=" * 60)
+    print("This crawler checks for NEW files on the website.")
+    print("It will SKIP files that are:")
+    print("  • Already downloaded (in download_history.txt)")
+    print("  • Listed as repealed (in repealed_law_names.json)")
+    print("=")
     print("Environment variables:")
     print("  BROWSER_TYPE: 'chromium' (default) or 'firefox'")
     print("  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION: S3 config")
