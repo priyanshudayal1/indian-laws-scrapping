@@ -1,18 +1,162 @@
+"""
+Combined Script: Repealed Laws Scraper + Law Crawler
+1. First scrapes repealed laws from India Code website
+2. Then crawls for NEW law PDFs, skipping already-downloaded and repealed laws
+"""
+
 import asyncio
+import argparse
 import os
 import re
 import json
+import time
 from pathlib import Path
 from playwright.async_api import async_playwright
 import aiohttp
 import boto3
 from dotenv import load_dotenv
 
+# Selenium imports for repealed laws scraper
+from docx import Document
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
 load_dotenv()
+
+# ============================================================================
+# SHARED CONFIGURATION
+# ============================================================================
 
 HISTORY_FILE = "download_history.txt"
 PROGRESS_FILE = "progress.json"
 FAILED_FILE = "failed_downloads.txt"
+
+
+# ============================================================================
+# REPEALED LAWS SCRAPER FUNCTIONS
+# ============================================================================
+
+def scrape_repealed_laws():
+    """Scrape all repealed law names from India Code website."""
+    
+    url = "https://www.indiacode.nic.in/repealed-act/repealed-act.jsp"
+    
+    # Setup Firefox driver with options
+    options = webdriver.FirefoxOptions()
+    # options.add_argument('--headless')  # Run in headless mode
+    
+    driver = webdriver.Firefox(options=options)
+    wait = WebDriverWait(driver, 20)
+    
+    all_laws = []
+    
+    try:
+        print("Opening webpage...")
+        driver.get(url)
+        
+        # Wait for the table to load
+        wait.until(EC.presence_of_element_located((By.ID, "repealedactid")))
+        time.sleep(2)  # Allow DataTable to fully initialize
+        
+        # Change entries per page to 100 for faster scraping
+        print("Setting entries per page to 100...")
+        try:
+            length_select = Select(driver.find_element(By.NAME, "repealedactid_length"))
+            length_select.select_by_value("100")
+            time.sleep(2)  # Wait for table to reload
+        except Exception as e:
+            print(f"Could not change page size: {e}")
+        
+        page_num = 1
+        
+        while True:
+            print(f"Scraping page {page_num}...")
+            
+            # Wait for table body to be present
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#repealedactid tbody tr")))
+            time.sleep(1)
+            
+            # Extract law names from current page
+            rows = driver.find_elements(By.CSS_SELECTOR, "#repealedactid tbody tr")
+            
+            for row in rows:
+                try:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) >= 2:
+                        sl_no = cells[0].text.strip()
+                        name = cells[1].text.strip()
+                        year = cells[2].text.strip() if len(cells) >= 3 else ""
+                        
+                        if name:
+                            all_laws.append({
+                                "sl_no": sl_no,
+                                "name": name,
+                                "year": year
+                            })
+                except Exception as e:
+                    print(f"Error extracting row: {e}")
+                    continue
+            
+            print(f"  Extracted {len(rows)} laws from page {page_num}. Total: {len(all_laws)}")
+            
+            # Check if there's a next page
+            try:
+                next_button = driver.find_element(By.ID, "repealedactid_next")
+                
+                # Check if next button is disabled
+                if "disabled" in next_button.get_attribute("class"):
+                    print("Reached last page.")
+                    break
+                
+                # Click next page
+                next_button.click()
+                time.sleep(1.5)  # Wait for page to load
+                page_num += 1
+                
+            except NoSuchElementException:
+                print("No more pages.")
+                break
+            except Exception as e:
+                print(f"Error navigating to next page: {e}")
+                break
+    
+    except TimeoutException:
+        print("Timeout waiting for page to load.")
+    except Exception as e:
+        print(f"Error during scraping: {e}")
+    finally:
+        driver.quit()
+    
+    return all_laws
+
+
+def save_repealed_to_json(laws, filename="repealed_laws.json"):
+    """Save the scraped repealed laws to a JSON file."""
+    
+    output = {
+        "total_count": len(laws),
+        "source": "https://www.indiacode.nic.in/repealed-act/repealed-act.jsp",
+        "scraped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "laws": laws
+    }
+    
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    
+    print(f"\n✅ Saved {len(laws)} repealed laws to {filename}")
+
+
+def extract_names_only(laws):
+    """Extract only the names of the laws."""
+    return [law["name"] for law in laws]
+
+
+# ============================================================================
+# LAW CRAWLER FUNCTIONS
+# ============================================================================
 
 def load_processed_laws():
     """Load set of already processed law names/filenames"""
@@ -25,6 +169,7 @@ def load_processed_laws():
         print(f"Error loading processed laws: {e}")
         return set()
 
+
 def save_processed_law(name):
     """Append a processed law to the history file"""
     try:
@@ -33,6 +178,7 @@ def save_processed_law(name):
     except Exception as e:
         print(f"Error saving processed law: {e}")
 
+
 def save_failed_law(name, reason=""):
     """Append a failed law to the failed downloads file"""
     try:
@@ -40,6 +186,7 @@ def save_failed_law(name, reason=""):
             f.write(f"{name}|{reason}\n")
     except Exception as e:
         print(f"Error saving failed law: {e}")
+
 
 def load_progress():
     """Load progress from JSON file for resume functionality"""
@@ -51,6 +198,7 @@ def load_progress():
     except Exception as e:
         print(f"Error loading progress: {e}")
         return None
+
 
 def update_progress(total, processed, current_page, current_row=0, skipped_repealed=0):
     """Update progress JSON file with current state"""
@@ -69,6 +217,7 @@ def update_progress(total, processed, current_page, current_row=0, skipped_repea
     except Exception as e:
         print(f"Error updating progress: {e}")
 
+
 def load_repealed_laws():
     """Load repealed law names from JSON file"""
     try:
@@ -82,6 +231,7 @@ def load_repealed_laws():
         print(f"Error loading repealed laws: {e}")
         return set()
 
+
 def is_repealed(law_name, repealed_names):
     """Check if law is in repealed list"""
     norm_name = " ".join(law_name.lower().split())
@@ -93,6 +243,7 @@ def is_repealed(law_name, repealed_names):
              if len(norm_repealed) == len(norm_name) or norm_repealed[len(norm_name)] in [',', ' ', '(']:
                  return True
     return False
+
 
 def upload_to_s3(file_path, bucket_name, object_name=None):
     """Upload file to S3 bucket"""
@@ -138,19 +289,15 @@ async def download_pdf(session, url, filename, download_dir, headers=None):
                 async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as response:
                     if response.status == 200:
                         content = await response.read()
-                        # Verify it's actually a PDF
-                        if len(content) > 100 and (content[:4] == b'%PDF' or b'%PDF' in content[:1024]):
-                            with open(filepath, 'wb') as f:
-                                f.write(content)
-                            print(f"  ✓ Downloaded: {filename}")
-                            return True
-                        else:
-                            print(f"  ✗ Not a valid PDF: {filename}")
-                            return False
+                        with open(filepath, 'wb') as f:
+                            f.write(content)
+                        print(f"  ✓ Downloaded: {filename}")
+                        return True
                     elif response.status == 404:
-                        return False  # No retry for 404
+                        print(f"  ✗ Not found (404): {filename}")
+                        return False
                     else:
-                        print(f"  ✗ Status {response.status}, attempt {attempt + 1}/3")
+                        print(f"  ✗ HTTP {response.status}: {filename}")
                         if attempt < 2:
                             await asyncio.sleep(2)
             except asyncio.TimeoutError:
@@ -310,7 +457,7 @@ async def scrape_india_code(max_retries=3):
         else:
             print("Using Chromium browser...")
             browser = await p.chromium.launch(
-                headless=False,
+                headless=True,
                 args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -370,16 +517,13 @@ async def scrape_india_code(max_retries=3):
                         try:
                             print(f"Trying direct URL: {direct_url}")
                             await page.goto(direct_url, wait_until="domcontentloaded", timeout=60000)
-                            await page.wait_for_timeout(5000)
-                            
-                            # Check if table is present
-                            table = await page.query_selector("#myTableSection, table.dataTable, .dataTables_wrapper")
-                            if table:
-                                print("  Found table via direct URL!")
+                            await page.wait_for_timeout(3000)
+                            if await page.query_selector("#myTableSection"):
+                                print("  ✓ Direct URL worked!")
                                 search_success = True
                                 break
                         except Exception as e:
-                            print(f"  Direct URL failed: {e}")
+                            print(f"  ✗ Direct URL failed: {e}")
                             continue
                     
                     if search_success:
@@ -395,7 +539,7 @@ async def scrape_india_code(max_retries=3):
                     
                     # Try to wait for page to be fully interactive
                     try:
-                        await page.wait_for_function("document.readyState === 'complete'", timeout=30000)
+                        await page.wait_for_load_state("networkidle", timeout=30000)
                     except Exception:
                         pass
                     
@@ -419,51 +563,43 @@ async def scrape_india_code(max_retries=3):
                     
                     for selector in search_selectors:
                         try:
-                            elem = await page.query_selector(selector)
-                            if elem:
-                                is_visible = await elem.is_visible()
-                                if is_visible:
-                                    search_input = elem
-                                    print(f"  Found search input with selector: {selector}")
-                                    break
-                        except Exception:
+                            search_input = await page.query_selector(selector)
+                            if search_input:
+                                print(f"  Found search input with selector: {selector}")
+                                break
+                        except Exception as e:
                             continue
                     
                     # Check if there's an iframe we need to switch to
                     if not search_input:
                         frames = page.frames
+                        print(f"  Checking {len(frames)} frames for search input...")
                         for frame in frames:
-                            if frame != page.main_frame:
+                            for selector in search_selectors:
                                 try:
-                                    for selector in search_selectors:
-                                        elem = await frame.query_selector(selector)
-                                        if elem:
-                                            print(f"  Found search input in iframe with selector: {selector}")
-                                            # Switch context to work with iframe
-                                            search_input = elem
-                                            break
+                                    search_input = await frame.query_selector(selector)
                                     if search_input:
+                                        print(f"  Found search input in iframe with selector: {selector}")
+                                        page = frame  # Switch to iframe
                                         break
                                 except Exception:
                                     continue
+                            if search_input:
+                                break
                     
                     if not search_input:
-                        # Save page content for debugging
+                        # Save debug info
                         page_content = await page.content()
-                        with open(f"debug_page_content_attempt_{attempt}.html", "w", encoding="utf-8") as f:
+                        with open("debug_search_not_found.html", "w", encoding="utf-8") as f:
                             f.write(page_content)
-                        await page.screenshot(path=f"debug_screenshot_attempt_{attempt}.png", full_page=True)
-                        
-                        # Log what elements we can find
-                        all_inputs = await page.query_selector_all("input")
-                        print(f"  Found {len(all_inputs)} input elements on page")
-                        for i, inp in enumerate(all_inputs[:10]):
-                            inp_id = await inp.get_attribute("id")
-                            inp_name = await inp.get_attribute("name")
-                            inp_type = await inp.get_attribute("type")
-                            print(f"    Input {i}: id={inp_id}, name={inp_name}, type={inp_type}")
-                        
-                        raise Exception("Search input not found after trying all selectors")
+                        await page.screenshot(path="debug_search_not_found.png")
+                        print(f"  ✗ Search input not found. Saved debug files.")
+                        if attempt < max_retries:
+                            print(f"  Retrying...")
+                            await asyncio.sleep(5)
+                            continue
+                        else:
+                            raise Exception("Search input not found after all attempts")
                     
                     # Proceed with search
                     print("Disabling 'required' attribute on search input...")
@@ -479,86 +615,187 @@ async def scrape_india_code(max_retries=3):
                     
                     print("Clicking on 'All' radio button...")
                     radio_selectors = ["input[name='searchradio'][value='all']", "#all", "input[value='all']", "input[type='radio']"]
-                    for selector in radio_selectors:
+                    radio_clicked = False
+                    for radio_sel in radio_selectors:
                         try:
-                            radio_btn = await page.query_selector(selector)
-                            if radio_btn:
-                                await radio_btn.click()
-                                print(f"  Clicked radio with selector: {selector}")
+                            radio = await page.query_selector(radio_sel)
+                            if radio:
+                                await radio.click()
+                                print(f"  ✓ Clicked radio button: {radio_sel}")
+                                radio_clicked = True
                                 break
-                        except Exception:
+                        except Exception as e:
                             continue
+                    
+                    if not radio_clicked:
+                        print("  ⚠ Could not find 'All' radio button, continuing anyway...")
                     
                     await page.wait_for_timeout(1000)
                     
-                    print("Clicking on 'Go!' search button...")
-                    search_btn_selectors = ["#btngo", "button[type='submit']", "input[type='submit']", ".btn-search", "button.btn", "#btnsearch"]
-                    for selector in search_btn_selectors:
+                    print("Clicking search button...")
+                    search_button_selectors = ["#btngo", "button[type='submit']", "input[type='submit']", "button.btn-primary", "#searchButton"]
+                    button_clicked = False
+                    for btn_sel in search_button_selectors:
                         try:
-                            btn = await page.query_selector(selector)
+                            btn = await page.query_selector(btn_sel)
                             if btn:
+                                print(f"  Clicking search button: {btn_sel}")
                                 await btn.click()
-                                print(f"  Clicked search button with selector: {selector}")
+                                print(f"  ✓ Clicked search button")
+                                button_clicked = True
                                 search_success = True
                                 break
-                        except Exception:
+                        except Exception as e:
+                            print(f"  ✗ Error with selector {btn_sel}: {str(e)[:50]}")
                             continue
                     
-                    if search_success:
+                    if button_clicked:
+                        # Wait a bit after click
+                        await page.wait_for_timeout(2000)
+                        # Verify we're on the results page
+                        current_url = page.url
+                        print(f"  Current URL after search: {current_url}")
                         break
+                    else:
+                        print("  ✗ Could not find search button")
+                        if attempt < max_retries:
+                            await asyncio.sleep(5)
+                            continue
                     
                 except Exception as e:
-                    print(f"  Attempt {attempt} failed: {e}")
+                    print(f"  ✗ Attempt {attempt} failed: {e}")
                     if attempt < max_retries:
-                        wait_time = 15 * attempt
-                        print(f"  Retrying in {wait_time} seconds...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        raise Exception(f"Failed to load page after {max_retries} attempts: {e}")
+                        await asyncio.sleep(5)
             
             if not search_success:
                 raise Exception("Could not access the acts list via any method")
             
-            print("Waiting for search results...")
-            try:
-                await page.wait_for_load_state("networkidle", timeout=90000)
-            except Exception:
-                print("  Warning: networkidle timeout, continuing anyway...")
+            print("Waiting for search results to fully load...")
             
-            # Extra wait for dynamic content
-            await page.wait_for_timeout(5000)
+            # Wait for page to stabilize
+            try:
+                await page.wait_for_load_state("networkidle", timeout=60000)
+                print("  ✓ Network idle detected")
+            except Exception as e:
+                print(f"  ⚠️ Network idle timeout: {e}")
+            
+            # Extra wait for dynamic content and JavaScript
+            await page.wait_for_timeout(8000)
+            print("  ✓ Waited for dynamic content")
             
             print("Waiting for table '#myTableSection' to be visible...")
             # Try multiple table selectors
-            table_selectors = ["#myTableSection", "table.dataTable", "#myTableSection_wrapper", "table[id*='Table']"]
+            print("Waiting for table '#myTableSection' to be visible...")
+            print(f"  Current URL: {page.url}")
+            print(f"  Page title: {await page.title()}")
+            
+            # Try multiple table selectors with better error reporting
+            table_selectors = [
+                "#discovery-result-results",
+                "#myTableSection",
+                "table.dataTable", 
+                "#myTableSection_wrapper",
+                "table[id*='Table']",
+                "table.display",
+                ".dataTables_wrapper table"
+            ]
+            
             table_found = False
+            found_selector = None
+            
             for selector in table_selectors:
                 try:
-                    await page.wait_for_selector(selector, state="visible", timeout=60000)
+                    print(f"  Trying selector: {selector}")
+                    await page.wait_for_selector(selector, state="visible", timeout=45000)
                     table_found = True
-                    print(f"  Found table with selector: {selector}")
+                    found_selector = selector
+                    print(f"  ✓ Found table with selector: {selector}")
                     break
-                except Exception:
+                except Exception as e:
+                    print(f"  ✗ Selector '{selector}' failed: {str(e)[:50]}")
                     continue
             
             if not table_found:
+                # Advanced debugging
+                print("\\n  ❌ TABLE NOT FOUND - Running diagnostics...")
+                print(f"  Page URL: {page.url}")
+                
+                # Check for error messages on page
+                try:
+                    error_msg = await page.inner_text(".error, .alert, #error")
+                    print(f"  Error message found: {error_msg[:100]}")
+                except:
+                    pass
+                
+                # Check what's actually on the page
+                try:
+                    body_text = await page.inner_text("body")
+                    print(f"  Body preview (first 300 chars): {body_text[:300]}")
+                except:
+                    pass
+                
+                # Check for any tables
+                try:
+                    all_tables = await page.query_selector_all("table")
+                    print(f"  Found {len(all_tables)} table(s) on page")
+                    for idx, table in enumerate(all_tables[:3]):
+                        table_id = await table.get_attribute("id")
+                        table_class = await table.get_attribute("class")
+                        print(f"    Table {idx}: id='{table_id}', class='{table_class}'")
+                except:
+                    pass
+                
                 # Save debug info
                 page_content = await page.content()
                 with open("debug_table_not_found.html", "w", encoding="utf-8") as f:
                     f.write(page_content)
-                await page.screenshot(path="debug_table_not_found.png")
-                raise Exception("Table not found after search")
+                await page.screenshot(path="debug_table_not_found.png", full_page=True)
+                print("  💾 Saved: debug_table_not_found.html and debug_table_not_found.png")
+                
+                raise Exception("Table not found after search. Check debug files for details.")
             
             print("Table loaded successfully!")
+
+            # Set entries per page to 100
+            try:
+                print("Setting page length to 100 entries...")
+                length_selectors = [
+                    "select[name='myTableSection_length']", 
+                    "select[name='discovery-result-results_length']",
+                    ".dataTables_length select"
+                ]
+                
+                for sel in length_selectors:
+                    elem = await page.query_selector(sel)
+                    if elem:
+                        await elem.select_option("100")
+                        print(f"  ✓ Set page size to 100 via {sel}")
+                        await page.wait_for_timeout(2000)
+                        break
+            except Exception as e:
+                print(f"  ⚠ Could not set page size: {e}")
             
-            info_text = await page.inner_text("#myTableSection_info")
-            print(f"\nTable info: {info_text}")
+            # Try to get table info from different possible selectors
+            info_selectors = ["#discovery-result-results_info", "#myTableSection_info", ".dataTables_info"]
+            info_text = ""
+            for info_sel in info_selectors:
+                try:
+                    info_text = await page.inner_text(info_sel)
+                    if info_text:
+                        print(f"\nTable info: {info_text}")
+                        break
+                except:
+                    continue
+            
+            if not info_text:
+                print("  ⚠️ Could not find table info element")
             
             total_laws_count = 0
             try:
                 match = re.search(r'of\s+([\d,]+)\s+entries', info_text)
                 if match:
                     total_laws_count = int(match.group(1).replace(',', ''))
+                    print(f"Total laws in database: {total_laws_count:,}")
             except Exception:
                 pass
 
@@ -578,15 +815,24 @@ async def scrape_india_code(max_retries=3):
                     
                     # Wait for table to be properly loaded after navigation
                     await page.wait_for_timeout(1000)
-                    await page.wait_for_selector("#myTableSection tbody tr", timeout=60000)
-                    rows = await page.query_selector_all("#myTableSection tbody tr")
+                    
+                    # Try both possible table IDs
+                    row_selectors = ["#discovery-result-results tbody tr", "#myTableSection tbody tr"]
+                    rows = []
+                    for row_sel in row_selectors:
+                        try:
+                            await page.wait_for_selector(row_sel, timeout=30000)
+                            rows = await page.query_selector_all(row_sel)
+                            if rows:
+                                break
+                        except:
+                            continue
                     print(f"Found {len(rows)} rows on this page")
                     
                     links_found_on_page = 0
                     new_downloads_on_page = 0
                     
                     for idx, row in enumerate(rows):
-                        
                         row_num = idx + 1
                         
                         try:
@@ -764,8 +1010,11 @@ async def scrape_india_code(max_retries=3):
                     else:
                         consecutive_empty_pages = 0  # Reset counter when we find links
                     
-                    # Check for next page
-                    next_button = await page.query_selector("#myTableSection_next")
+                    # Check for next page - try both possible table IDs
+                    next_button = await page.query_selector("#discovery-result-results_next")
+                    if not next_button:
+                        next_button = await page.query_selector("#myTableSection_next")
+                    
                     if next_button:
                         classes = await next_button.get_attribute("class")
                         if "disabled" in classes:
@@ -776,19 +1025,24 @@ async def scrape_india_code(max_retries=3):
                             break
                         else:
                             # Try DataTables API for direct page navigation first
-                            next_page = page_num + 1
+                            next_page_num = page_num + 1
                             direct_nav_success = False
                             
                             try:
                                 result = await page.evaluate(f"""
                                     () => {{
                                         try {{
-                                            const table = $('#myTableSection').DataTable();
-                                            if (table) {{
-                                                table.page({next_page - 1}).draw('page');
+                                            // Try discovery-result-results first, then myTableSection
+                                            let table = $('#discovery-result-results').DataTable();
+                                            if (!table || !table.page) {{
+                                                table = $('#myTableSection').DataTable();
+                                            }}
+                                            if (table && table.page) {{
+                                                table.page({next_page_num - 1}).draw('page');
                                                 return true;
                                             }}
                                         }} catch (e) {{
+                                            console.error(e);
                                             return false;
                                         }}
                                         return false;
@@ -800,14 +1054,14 @@ async def scrape_india_code(max_retries=3):
                                         await page.wait_for_load_state("networkidle", timeout=30000)
                                     except Exception:
                                         pass
-                                    print(f"\n[NAV] Page {page_num} -> {next_page} via DataTables API ✓")
+                                    print(f"\n[NAV] Page {page_num} -> {next_page_num} via DataTables API ✓")
                                     direct_nav_success = True
                             except Exception as e:
                                 print(f"\n[NAV] DataTables API failed: {e}")
                             
                             # Fallback to clicking next button
                             if not direct_nav_success:
-                                print(f"\n[NAV] Page {page_num} -> {next_page} via CLICK NEXT (fallback)")
+                                print(f"\n[NAV] Page {page_num} -> {next_page_num} via CLICK NEXT (fallback)")
                                 await next_button.click()
                                 await page.wait_for_timeout(2000)
                                 try:
@@ -856,21 +1110,107 @@ async def scrape_india_code(max_retries=3):
             print("\nBrowser closed.")
 
 
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+async def run_full_pipeline():
+    """Run complete pipeline: Scrape repealed laws, then crawl for new PDFs"""
+    
+    print("=" * 60)
+    print("FULL PIPELINE: Repealed Laws Scraper + Law Crawler")
+    print("=" * 60)
+    print()
+    
+    # Step 1: Scrape repealed laws
+    print("🔹 STEP 1: Scraping Repealed Laws")
+    print("=" * 60)
+    
+    laws = scrape_repealed_laws()
+    
+    if laws:
+        # Save to JSON files
+        save_repealed_to_json(laws, "repealed_laws.json")
+        
+        names_only = {
+            "total_count": len(laws),
+            "names": extract_names_only(laws)
+        }
+        with open("repealed_law_names.json", "w", encoding="utf-8") as handle:
+            json.dump(names_only, handle, indent=2, ensure_ascii=False)
+        
+        print(f"✅ Saved {len(names_only['names'])} repealed law names to repealed_law_names.json")
+        
+        print(f"\nFirst 5 repealed laws:")
+        print("-" * 40)
+        for law in laws[:5]:
+            print(f"  {law['sl_no']}. {law['name']} ({law['year']})")
+    else:
+        print("⚠️  Warning: No repealed laws were scraped. Continuing anyway...")
+    
+    print()
+    print("=" * 60)
+    print("🔹 STEP 2: Crawling for New Law PDFs")
+    print("=" * 60)
+    print()
+    
+    # Step 2: Run law crawler
+    await scrape_india_code()
+    
+    print()
+    print("=" * 60)
+    print("✅ FULL PIPELINE COMPLETED!")
+    print("=" * 60)
+
+
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(
+        description="Combined script: Scrape repealed laws then crawl for new law PDFs"
+    )
+    parser.add_argument(
+        "--crawler-only",
+        action="store_true",
+        help="Skip repealed laws scraping, only run the crawler"
+    )
+    parser.add_argument(
+        "--repealed-only",
+        action="store_true",
+        help="Only scrape repealed laws, skip crawler"
+    )
     
-    # Print usage info
-    print("=" * 60)
-    print("Indian Law Crawler - NEW Files Only")
-    print("=" * 60)
-    print("This crawler checks for NEW files on the website.")
-    print("It will SKIP files that are:")
-    print("  • Already downloaded (in download_history.txt)")
-    print("  • Listed as repealed (in repealed_law_names.json)")
-    print("=")
-    print("Environment variables:")
-    print("  BROWSER_TYPE: 'chromium' (default) or 'firefox'")
-    print("  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION: S3 config")
-    print("=" * 60)
+    args = parser.parse_args()
     
-    asyncio.run(scrape_india_code())
+    if args.repealed_only:
+        # Only scrape repealed laws
+        print("=" * 60)
+        print("Repealed Laws Scraper Only")
+        print("=" * 60)
+        laws = scrape_repealed_laws()
+        if laws:
+            save_repealed_to_json(laws, "repealed_laws.json")
+            names_only = {
+                "total_count": len(laws),
+                "names": extract_names_only(laws)
+            }
+            with open("repealed_law_names.json", "w", encoding="utf-8") as handle:
+                json.dump(names_only, handle, indent=2, ensure_ascii=False)
+            print(f"✅ Saved to repealed_law_names.json")
+    
+    elif args.crawler_only:
+        # Only run crawler
+        print("=" * 60)
+        print("Law Crawler Only - NEW Files")
+        print("=" * 60)
+        print("Environment variables:")
+        print("  BROWSER_TYPE: 'chromium' (default) or 'firefox'")
+        print("  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION: S3 config")
+        print("=" * 60)
+        asyncio.run(scrape_india_code())
+    
+    else:
+        # Run full pipeline
+        print("Environment variables:")
+        print("  BROWSER_TYPE: 'chromium' (default) or 'firefox'")
+        print("  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION: S3 config")
+        print()
+        asyncio.run(run_full_pipeline())
