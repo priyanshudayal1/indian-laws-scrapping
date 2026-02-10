@@ -46,7 +46,7 @@ def scrape_repealed_laws():
     
     # Setup Firefox driver with options
     options = webdriver.FirefoxOptions()
-    # options.add_argument('--headless')  # Run in headless mode
+    options.add_argument('--headless')  # Run in headless mode
     
     driver = webdriver.Firefox(options=options)
     wait = WebDriverWait(driver, 20)
@@ -451,7 +451,7 @@ async def scrape_india_code(max_retries=3):
         if browser_type == 'firefox':
             print("Using Firefox browser...")
             browser = await p.firefox.launch(
-                headless=False,
+                headless=True,
                 args=['--no-sandbox']
             )
         else:
