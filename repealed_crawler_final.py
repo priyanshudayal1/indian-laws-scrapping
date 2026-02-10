@@ -775,7 +775,6 @@ async def scrape_india_code(max_retries=3):
                 skipped_repealed = 0
                 skipped_already_downloaded = 0
                 consecutive_empty_pages = 0  # Track pages with no valid links
-                consecutive_skipped = 0  # Track consecutive already-downloaded files
                 
                 while True:
                     print(f"\n{'='*60}")
@@ -831,29 +830,16 @@ async def scrape_india_code(max_retries=3):
                             if pdf_filename in processed_files:
                                 print(f"    ⏭️  SKIP: Already downloaded")
                                 skipped_already_downloaded += 1
-                                consecutive_skipped += 1
                                 update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, idx, skipped_repealed)
-                                
-                                # Optimization: If we've skipped 20+ consecutive files, jump ahead
-                                if consecutive_skipped >= 20:
-                                    print(f"\n    {'⚡'*20}")
-                                    print(f"    ⚡ OPTIMIZATION: {consecutive_skipped} consecutive files already downloaded")
-                                    print(f"    ⚡ Likely all files on this page are old - moving to next page")
-                                    print(f"    {'⚡'*20}\n")
-                                    break  # Skip rest of this page
-                                
                                 continue
                             
                             # CRAWLER LOGIC: Skip if repealed
                             if is_repealed(law_name, repealed_names):
                                 print(f"    ⏭️  SKIP: Repealed law")
                                 skipped_repealed += 1
-                                consecutive_skipped += 1
                                 update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, idx, skipped_repealed)
                                 continue
                             
-                            # Reset consecutive skip counter - found a new file
-                            consecutive_skipped = 0
                             print(f"    🆕 NEW FILE DETECTED - Downloading...")
                             
                             href = await link_elem.get_attribute("href")
