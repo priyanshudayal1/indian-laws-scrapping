@@ -16,14 +16,6 @@ import aiohttp
 import boto3
 from dotenv import load_dotenv
 
-# Selenium imports for repealed laws scraper
-from docx import Document
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-
 load_dotenv()
 
 # ============================================================================
@@ -39,96 +31,73 @@ FAILED_FILE = "failed_downloads.txt"
 # REPEALED LAWS SCRAPER FUNCTIONS
 # ============================================================================
 
-def scrape_repealed_laws():
-    """Scrape all repealed law names from India Code website."""
+async def scrape_repealed_laws():
+    """Scrape all repealed law names from India Code website using Playwright."""
     
     url = "https://www.indiacode.nic.in/repealed-act/repealed-act.jsp"
-    
-    # Setup Firefox driver with options
-    options = webdriver.FirefoxOptions()
-    options.add_argument('--headless')  # Run in headless mode
-    
-    driver = webdriver.Firefox(options=options)
-    wait = WebDriverWait(driver, 20)
-    
     all_laws = []
     
-    try:
-        print("Opening webpage...")
-        driver.get(url)
+    async with async_playwright() as p:
+        browser = await p.firefox.launch(headless=True)
+        page = await browser.new_page()
         
-        # Wait for the table to load
-        wait.until(EC.presence_of_element_located((By.ID, "repealedactid")))
-        time.sleep(2)  # Allow DataTable to fully initialize
-        
-        # Change entries per page to 100 for faster scraping
-        print("Setting entries per page to 100...")
         try:
-            length_select = Select(driver.find_element(By.NAME, "repealedactid_length"))
-            length_select.select_by_value("100")
-            time.sleep(2)  # Wait for table to reload
-        except Exception as e:
-            print(f"Could not change page size: {e}")
-        
-        page_num = 1
-        
-        while True:
-            print(f"Scraping page {page_num}...")
+            print("Opening webpage...")
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_selector("#repealedactid", timeout=30000)
+            await page.wait_for_timeout(2000)
             
-            # Wait for table body to be present
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#repealedactid tbody tr")))
-            time.sleep(1)
-            
-            # Extract law names from current page
-            rows = driver.find_elements(By.CSS_SELECTOR, "#repealedactid tbody tr")
-            
-            for row in rows:
-                try:
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if len(cells) >= 2:
-                        sl_no = cells[0].text.strip()
-                        name = cells[1].text.strip()
-                        year = cells[2].text.strip() if len(cells) >= 3 else ""
-                        
-                        if name:
-                            all_laws.append({
-                                "sl_no": sl_no,
-                                "name": name,
-                                "year": year
-                            })
-                except Exception as e:
-                    print(f"Error extracting row: {e}")
-                    continue
-            
-            print(f"  Extracted {len(rows)} laws from page {page_num}. Total: {len(all_laws)}")
-            
-            # Check if there's a next page
+            print("Setting entries per page to 100...")
             try:
-                next_button = driver.find_element(By.ID, "repealedactid_next")
-                
-                # Check if next button is disabled
-                if "disabled" in next_button.get_attribute("class"):
-                    print("Reached last page.")
-                    break
-                
-                # Click next page
-                next_button.click()
-                time.sleep(1.5)  # Wait for page to load
-                page_num += 1
-                
-            except NoSuchElementException:
-                print("No more pages.")
-                break
+                await page.select_option("select[name='repealedactid_length']", "100")
+                await page.wait_for_timeout(2000)
             except Exception as e:
-                print(f"Error navigating to next page: {e}")
-                break
-    
-    except TimeoutException:
-        print("Timeout waiting for page to load.")
-    except Exception as e:
-        print(f"Error during scraping: {e}")
-    finally:
-        driver.quit()
+                print(f"Could not change page size: {e}")
+            
+            page_num = 1
+            while True:
+                print(f"Scraping page {page_num}...")
+                
+                await page.wait_for_selector("#repealedactid tbody tr", timeout=30000)
+                await page.wait_for_timeout(1000)
+                
+                rows = await page.query_selector_all("#repealedactid tbody tr")
+                page_laws = []
+                
+                for row in rows:
+                    try:
+                        cells = await row.query_selector_all("td")
+                        if len(cells) >= 2:
+                            sl_no = (await cells[0].inner_text()).strip()
+                            name = (await cells[1].inner_text()).strip()
+                            year = (await cells[2].inner_text()).strip() if len(cells) >= 3 else ""
+                            
+                            if name:
+                                page_laws.append({"sl_no": sl_no, "name": name, "year": year})
+                    except Exception as e:
+                        print(f"Error extracting row: {str(e)[:100]}")
+                        continue
+                
+                if page_laws:
+                    all_laws.extend(page_laws)
+                    print(f"  Extracted {len(page_laws)} laws from page {page_num}. Total: {len(all_laws)}")
+                
+                next_button = await page.query_selector("#repealedactid_next")
+                if next_button:
+                    classes = await next_button.get_attribute("class")
+                    if "disabled" in classes:
+                        print("Reached last page.")
+                        break
+                    await next_button.click()
+                    await page.wait_for_timeout(1500)
+                    page_num += 1
+                else:
+                    break
+                    
+        except Exception as e:
+            print(f"Error during scraping: {e}")
+        finally:
+            await browser.close()
     
     return all_laws
 
@@ -1126,7 +1095,7 @@ async def run_full_pipeline():
     print("🔹 STEP 1: Scraping Repealed Laws")
     print("=" * 60)
     
-    laws = scrape_repealed_laws()
+    laws = await scrape_repealed_laws()
     
     if laws:
         # Save to JSON files
@@ -1185,7 +1154,7 @@ if __name__ == "__main__":
         print("=" * 60)
         print("Repealed Laws Scraper Only")
         print("=" * 60)
-        laws = scrape_repealed_laws()
+        laws = asyncio.run(scrape_repealed_laws())
         if laws:
             save_repealed_to_json(laws, "repealed_laws.json")
             names_only = {
