@@ -139,6 +139,18 @@ def load_processed_laws():
         return set()
 
 
+def load_failed_laws():
+    """Load set of failed law names from failed downloads file"""
+    if not os.path.exists(FAILED_FILE):
+        return set()
+    try:
+        with open(FAILED_FILE, 'r', encoding='utf-8') as f:
+            return set(line.split('|')[0].strip() for line in f if line.strip())
+    except Exception as e:
+        print(f"Error loading failed laws: {e}")
+        return set()
+
+
 def save_processed_law(name):
     """Append a processed law to the history file"""
     try:
@@ -404,9 +416,14 @@ async def scrape_india_code(max_retries=3):
 
     processed_files = load_processed_laws()
     print(f"Loaded {len(processed_files)} previously downloaded files.")
+    
+    failed_laws = load_failed_laws()
+    print(f"Loaded {len(failed_laws)} previously failed downloads.")
+    
     print(f"Will only download files that are:")
     print(f"  ✓ NOT in download history")
     print(f"  ✓ NOT in repealed laws list")
+    print(f"  ✓ NOT in failed downloads list")
     print(f"{'='*60}\n")
     
     # Crawler always starts from page 1 to check for new files
@@ -771,10 +788,11 @@ async def scrape_india_code(max_retries=3):
             # Crawler starts from page 1
             async with aiohttp.ClientSession() as session:
                 page_num = 1
-                total_downloaded = 0  # Count only NEW downloads in this session
+                total_downloaded = 0
                 skipped_repealed = 0
                 skipped_already_downloaded = 0
-                consecutive_empty_pages = 0  # Track pages with no valid links
+                skipped_failed = 0
+                consecutive_empty_pages = 0
                 
                 while True:
                     print(f"\n{'='*60}")
@@ -837,6 +855,13 @@ async def scrape_india_code(max_retries=3):
                             if is_repealed(law_name, repealed_names):
                                 print(f"    ⏭️  SKIP: Repealed law")
                                 skipped_repealed += 1
+                                update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, idx, skipped_repealed)
+                                continue
+                            
+                            # CRAWLER LOGIC: Skip if previously failed
+                            if law_name in failed_laws:
+                                print(f"    ⏭️  SKIP: Previously failed")
+                                skipped_failed += 1
                                 update_progress(total_laws_count, len(processed_files) + total_downloaded, page_num, idx, skipped_repealed)
                                 continue
                             
@@ -949,6 +974,7 @@ async def scrape_india_code(max_retries=3):
                     print(f"   • New downloads: {new_downloads_on_page}")
                     print(f"   • Already downloaded: {skipped_already_downloaded}")
                     print(f"   • Repealed (skipped): {skipped_repealed}")
+                    print(f"   • Failed (skipped): {skipped_failed}")
                     print(f"{'─'*60}\n")
                     
                     # Track consecutive pages with no valid links
@@ -1035,6 +1061,7 @@ async def scrape_india_code(max_retries=3):
             print(f"📥 NEW files downloaded this session: {total_downloaded}")
             print(f"⏭️  Already downloaded (skipped): {skipped_already_downloaded}")
             print(f"⏭️  Repealed laws (skipped): {skipped_repealed}")
+            print(f"⏭️  Previously failed (skipped): {skipped_failed}")
             print(f"📁 Total files in history: {len(processed_files)}")
             print(f"💾 PDFs saved in: {download_dir.absolute()}")
             print(f"{'='*60}\n")
