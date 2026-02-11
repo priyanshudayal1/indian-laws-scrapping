@@ -416,15 +416,32 @@ async def scrape_india_code(max_retries=3):
 
     processed_files = load_processed_laws()
     print(f"Loaded {len(processed_files)} previously downloaded files.")
-    
+
     failed_laws = load_failed_laws()
     print(f"Loaded {len(failed_laws)} previously failed downloads.")
-    
+
     print(f"Will only download files that are:")
     print(f"  ✓ NOT in download history")
     print(f"  ✓ NOT in repealed laws list")
     print(f"  ✓ NOT in failed downloads list")
     print(f"{'='*60}\n")
+
+    # --- NEW LOGIC: Remove S3 files for already-downloaded repealed laws ---
+    print("Checking for already-downloaded files that are now repealed...")
+    repealed_downloaded = [fname for fname in processed_files if is_repealed(fname.rsplit('.pdf', 1)[0].replace('_', ' '), repealed_names)]
+    for fname in repealed_downloaded:
+        print(f"  🗑️  Removing repealed law from S3: {fname}")
+        try:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+                region_name=os.getenv('AWS_REGION')
+            )
+            s3_client.delete_object(Bucket="ragbareacttestings3vector", Key=fname)
+            print(f"    ✓ Deleted from S3: {fname}")
+        except Exception as e:
+            print(f"    ✗ Failed to delete {fname} from S3: {e}")
     
     # Crawler always starts from page 1 to check for new files
     resume_page = 1
